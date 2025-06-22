@@ -190,6 +190,9 @@ class VecTask(Env):
         self.obs_buf_lag_history = torch.zeros((
             self.num_envs, 80, self.num_obs // 3
         ), device=self.device, dtype=torch.float)
+        self.obj_pos_lag_history = torch.zeros((
+            self.num_envs, 80, 3
+        ), device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
         self.at_reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)

@@ -26,10 +26,10 @@ class MLP(nn.Module):
 
 
 class ProprioAdaptTConv(nn.Module):
-    def __init__(self):
+    def __init__(self, input_chan):
         super(ProprioAdaptTConv, self).__init__()
         self.channel_transform = nn.Sequential(
-            nn.Linear(16 + 16, 32),
+            nn.Linear(input_chan, 32),
             nn.ReLU(inplace=True),
             nn.Linear(32, 32),
             nn.ReLU(inplace=True),
@@ -55,35 +55,38 @@ class ProprioAdaptTConv(nn.Module):
 class ActorCritic(nn.Module):
     def __init__(self, kwargs):
         nn.Module.__init__(self)
-        actions_num = kwargs.pop('actions_num')
-        input_shape = kwargs.pop('input_shape')
-        self.units = kwargs.pop('actor_units')
-        self.priv_mlp = kwargs.pop('priv_mlp_units')
+        actions_num = kwargs.pop("actions_num")
+        input_shape = kwargs.pop("input_shape")
+        self.units = kwargs.pop("actor_units")
+        self.priv_mlp = kwargs.pop("priv_mlp_units")
         mlp_input_shape = input_shape[0]
 
         out_size = self.units[-1]
-        self.priv_info = kwargs['priv_info']
-        self.priv_info_stage2 = kwargs['proprio_adapt']
+        self.priv_info = kwargs["priv_info"]
+        self.priv_info_stage2 = kwargs["proprio_adapt"]
         if self.priv_info:
             mlp_input_shape += self.priv_mlp[-1]
-            self.env_mlp = MLP(units=self.priv_mlp, input_size=kwargs['priv_info_dim'])
+            self.env_mlp = MLP(units=self.priv_mlp, input_size=kwargs["priv_info_dim"])
 
             if self.priv_info_stage2:
-                self.adapt_tconv = ProprioAdaptTConv()
+                self.adapt_tconv = ProprioAdaptTConv(input_chan=35)
 
         self.actor_mlp = MLP(units=self.units, input_size=mlp_input_shape)
         self.value = torch.nn.Linear(out_size, 1)
         self.mu = torch.nn.Linear(out_size, actions_num)
-        self.sigma = nn.Parameter(torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
+        self.sigma = nn.Parameter(
+            torch.zeros(actions_num, requires_grad=True, dtype=torch.float32),
+            requires_grad=True,
+        )
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv1d):
                 fan_out = m.kernel_size[0] * m.out_channels
                 m.weight.data.normal_(mean=0.0, std=np.sqrt(2.0 / fan_out))
-                if getattr(m, 'bias', None) is not None:
+                if getattr(m, "bias", None) is not None:
                     torch.nn.init.zeros_(m.bias)
             if isinstance(m, nn.Linear):
-                if getattr(m, 'bias', None) is not None:
+                if getattr(m, "bias", None) is not None:
                     torch.nn.init.zeros_(m.bias)
         nn.init.constant_(self.sigma, 0)
 
@@ -96,11 +99,13 @@ class ActorCritic(nn.Module):
         distr = torch.distributions.Normal(mu, sigma)
         selected_action = distr.sample()
         result = {
-            'neglogpacs': -distr.log_prob(selected_action).sum(1), # self.neglogp(selected_action, mu, sigma, logstd),
-            'values': value,
-            'actions': selected_action,
-            'mus': mu,
-            'sigmas': sigma,
+            "neglogpacs": -distr.log_prob(selected_action).sum(
+                1
+            ),  # self.neglogp(selected_action, mu, sigma, logstd),
+            "values": value,
+            "actions": selected_action,
+            "mus": mu,
+            "sigmas": sigma,
         }
         return result
 
@@ -111,18 +116,31 @@ class ActorCritic(nn.Module):
         return mu
 
     def _actor_critic(self, obs_dict):
-        obs = obs_dict['obs']
+        obs = obs_dict["obs"]
         extrin, extrin_gt = None, None
         if self.priv_info:
             if self.priv_info_stage2:
-                extrin = self.adapt_tconv(obs_dict['proprio_hist'])
+                # extrin = self.adapt_tconv(obs_dict["proprio_hist"])
+                extrin = self.adapt_tconv(
+                    torch.cat(
+                        [
+                            obs_dict["proprio_hist"],
+                            obs_dict["object_pos_hist"],
+                        ],
+                        dim=-1,
+                    )
+                )
                 # during supervised training, extrin has gt label
-                extrin_gt = self.env_mlp(obs_dict['priv_info']) if 'priv_info' in obs_dict else extrin
+                extrin_gt = (
+                    self.env_mlp(obs_dict["priv_info"])
+                    if "priv_info" in obs_dict
+                    else extrin
+                )
                 extrin_gt = torch.tanh(extrin_gt)
                 extrin = torch.tanh(extrin)
                 obs = torch.cat([obs, extrin], dim=-1)
             else:
-                extrin = self.env_mlp(obs_dict['priv_info'])
+                extrin = self.env_mlp(obs_dict["priv_info"])
                 extrin = torch.tanh(extrin)
                 obs = torch.cat([obs, extrin], dim=-1)
 
@@ -133,7 +151,7 @@ class ActorCritic(nn.Module):
         return mu, mu * 0 + sigma, value, extrin, extrin_gt
 
     def forward(self, input_dict):
-        prev_actions = input_dict.get('prev_actions', None)
+        prev_actions = input_dict.get("prev_actions", None)
         rst = self._actor_critic(input_dict)
         mu, logstd, value, extrin, extrin_gt = rst
         sigma = torch.exp(logstd)
@@ -141,12 +159,12 @@ class ActorCritic(nn.Module):
         entropy = distr.entropy().sum(dim=-1)
         prev_neglogp = -distr.log_prob(prev_actions).sum(1)
         result = {
-            'prev_neglogp': torch.squeeze(prev_neglogp),
-            'values': value,
-            'entropy': entropy,
-            'mus': mu,
-            'sigmas': sigma,
-            'extrin': extrin,
-            'extrin_gt': extrin_gt,
+            "prev_neglogp": torch.squeeze(prev_neglogp),
+            "values": value,
+            "entropy": entropy,
+            "mus": mu,
+            "sigmas": sigma,
+            "extrin": extrin,
+            "extrin_gt": extrin_gt,
         }
         return result
