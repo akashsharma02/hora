@@ -92,6 +92,7 @@ class ProprioAdapt(object):
         self.model.eval()
         self.running_mean_std.eval()
         self.sa_mean_std.eval()
+        self.obj_pos_mean_std.eval()
 
     def test(self):
         self.set_eval()
@@ -100,6 +101,7 @@ class ProprioAdapt(object):
             input_dict = {
                 "obs": self.running_mean_std(obs_dict["obs"]),
                 "proprio_hist": self.sa_mean_std(obs_dict["proprio_hist"].detach()),
+                "object_pos_hist": self.obj_pos_mean_std(obs_dict["object_pos_hist"].detach()),
             }
             mu = self.model.act_inference(input_dict)
             mu = torch.clamp(mu, -1.0, 1.0)
@@ -191,6 +193,7 @@ class ProprioAdapt(object):
         self.running_mean_std.load_state_dict(checkpoint["running_mean_std"])
         self.model.load_state_dict(checkpoint["model"])
         self.sa_mean_std.load_state_dict(checkpoint["sa_mean_std"])
+        self.obj_pos_mean_std.load_state_dict(checkpoint["obj_pos_mean_std"])
 
     def save(self, name):
         weights = {

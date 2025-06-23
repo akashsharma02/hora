@@ -449,7 +449,10 @@ class AllegroHandHora(VecTask):
             len(env_ids),
         )
 
-        self.object_init_state[env_ids, 0:7] = self.object_pose[env_ids].clone()
+        self.object_init_state[env_ids, 0:7] =  self.root_state_tensor[
+            self.object_indices[env_ids], :7
+        ].clone()
+
         self.progress_buf[env_ids] = 0
         self.obs_buf[env_ids] = 0
         self.rb_forces[env_ids] = 0
@@ -461,7 +464,6 @@ class AllegroHandHora(VecTask):
     def compute_observations(self):
         self._refresh_gym()
         # deal with normal observation, do sliding window
-        prev_obj_pos_buf = self.obj_pos_lag_history[:, 1:].clone()
         prev_obs_buf = self.obs_buf_lag_history[:, 1:].clone()
         joint_noise_matrix = (
             torch.rand(self.allegro_hand_dof_pos.shape) * 2.0 - 1.0
@@ -477,25 +479,26 @@ class AllegroHandHora(VecTask):
         )
         cur_tar_buf = self.cur_targets[:, None]
         cur_obs_buf = torch.cat([cur_obs_buf, cur_tar_buf], dim=-1)
+
+        prev_obj_pos_buf = self.obj_pos_lag_history[:, 1:].clone()
         obj_pose_noise_scale = 0.01
         observation_noise = torch.randn((self.num_envs, self.object_pos.shape[1]), device=self.device) * obj_pose_noise_scale
-        cur_obj_pose = self.object_pose[:, :7]
+
+        cur_obj_pose = self.object_pose[:, :7].clone()
         cur_obj_R = quaternion_to_matrix(cur_obj_pose[:, 3:7])
         init_obj_R = quaternion_to_matrix(self.object_init_state[:, 3:7])
         init_obj_T = torch.eye(4, device=self.device).repeat(self.num_envs, 1, 1)
         init_obj_T[:, :3, :3] = init_obj_R
-        init_obj_T[:, :3, 3] = self.object_init_state[:, :3]
+        init_obj_T[:, :3, 3] = self.object_init_state[:, :3].clone()
 
         cur_obj_T = torch.eye(4, device=self.device).repeat(self.num_envs, 1, 1)
         cur_obj_T[:, :3, :3] = cur_obj_R
-        cur_obj_T[:, :3, 3] = self.object_pos[:, :3]
+        cur_obj_T[:, :3, 3] = cur_obj_pose[:, :3]
 
-        relative_obj_T = torch.bmm(torch.inverse(init_obj_T),cur_obj_T)
+        relative_obj_T = torch.bmm(torch.inverse(init_obj_T), cur_obj_T)
         relative_obj_pos = relative_obj_T[:, :3, 3]
-        print(f"relative_obj_pos: {relative_obj_pos.shape}, cur_obj_T: {cur_obj_T.shape}, init_obj_T: {init_obj_T.shape}")
-        cur_obj_pos = relative_obj_pos + observation_noise[:, None]
-
-        # cur_obj_pos = self.object_pos[:, None] + observation_noise[:, None]
+        # cur_obj_pos = relative_obj_pos[:, None] + observation_noise[:, None]
+        cur_obj_pos = self.object_pos[:, None] + observation_noise[:, None]
         
 
 
@@ -516,9 +519,12 @@ class AllegroHandHora(VecTask):
         self.obs_buf_lag_history[at_reset_env_ids, :, 16:32] = (
             self.allegro_hand_dof_pos[at_reset_env_ids].unsqueeze(1)
         )
-        self.obj_pos_lag_history[at_reset_env_ids, :, 0:3] = self.object_pos[
+        # self.obj_pos_lag_history[at_reset_env_ids, :, 0:3] = self.object_pos[
+        #     at_reset_env_ids
+        # ].clone().unsqueeze(1)
+        self.obj_pos_lag_history[at_reset_env_ids, :, 0:3] = cur_obj_pos[
             at_reset_env_ids
-        ].clone().unsqueeze(1)
+        ].clone()
 
         t_buf = (self.obs_buf_lag_history[:, -3:].reshape(self.num_envs, -1)).clone()
 
@@ -528,9 +534,11 @@ class AllegroHandHora(VecTask):
         self.proprio_hist_buf[:] = self.obs_buf_lag_history[
             :, -self.prop_hist_len :
         ].clone()
+
         self.object_pos_hist_buf[:] = self.obj_pos_lag_history[
             :, -self.prop_hist_len :
         ].clone()
+
         self._update_priv_buf(
             env_id=range(self.num_envs),
             name="obj_position",
