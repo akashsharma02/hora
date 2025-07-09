@@ -69,7 +69,7 @@ class ActorCritic(nn.Module):
             self.env_mlp = MLP(units=self.priv_mlp, input_size=kwargs["priv_info_dim"])
 
             if self.priv_info_stage2:
-                self.adapt_tconv = ProprioAdaptTConv(input_chan=35)
+                self.adapt_tconv = ProprioAdaptTConv(input_chan=(32 + 7))
 
         self.actor_mlp = MLP(units=self.units, input_size=mlp_input_shape)
         self.value = torch.nn.Linear(out_size, 1)
@@ -125,7 +125,7 @@ class ActorCritic(nn.Module):
                     torch.cat(
                         [
                             obs_dict["proprio_hist"],
-                            obs_dict["object_pos_hist"],
+                            obs_dict["object_pose_hist"],
                         ],
                         dim=-1,
                     )

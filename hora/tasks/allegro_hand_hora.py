@@ -21,7 +21,11 @@ from isaacgym.torch_utils import (
 )
 from glob import glob
 from hora.utils.misc import tprint
-from hora.utils.rotations import quaternion_to_matrix
+from hora.utils.rotations import (
+    quat_from_euler_xyz,
+    quaternion_to_matrix,
+    matrix_to_quaternion,
+)
 from .base.vec_task import VecTask
 
 
@@ -226,6 +230,7 @@ class AllegroHandHora(VecTask):
         )
 
         hand_pose, obj_pose = self._init_object_pose()
+        self.hand_pose = hand_pose
 
         # compute aggregate size
         self.num_allegro_hand_bodies = self.gym.get_asset_rigid_body_count(
@@ -449,7 +454,7 @@ class AllegroHandHora(VecTask):
             len(env_ids),
         )
 
-        self.object_init_state[env_ids, 0:7] =  self.root_state_tensor[
+        self.object_init_state[env_ids, 0:7] = self.root_state_tensor[
             self.object_indices[env_ids], :7
         ].clone()
 
@@ -458,7 +463,7 @@ class AllegroHandHora(VecTask):
         self.rb_forces[env_ids] = 0
         self.priv_info_buf[env_ids, 0:3] = 0
         self.proprio_hist_buf[env_ids] = 0
-        self.object_pos_hist_buf[env_ids] = 0
+        self.object_pose_hist_buf[env_ids] = 0
         self.at_reset_buf[env_ids] = 1
 
     def compute_observations(self):
@@ -480,30 +485,54 @@ class AllegroHandHora(VecTask):
         cur_tar_buf = self.cur_targets[:, None]
         cur_obs_buf = torch.cat([cur_obs_buf, cur_tar_buf], dim=-1)
 
-        prev_obj_pos_buf = self.obj_pos_lag_history[:, 1:].clone()
+        prev_obj_pos_buf = self.obj_pose_lag_history[:, 1:].clone()
         obj_pose_noise_scale = 0.01
-        observation_noise = torch.randn((self.num_envs, self.object_pos.shape[1]), device=self.device) * obj_pose_noise_scale
+        observation_noise = (
+            torch.randn((self.num_envs, self.object_pos.shape[1]), device=self.device)
+            * obj_pose_noise_scale
+        )
 
         cur_obj_pose = self.object_pose[:, :7].clone()
         cur_obj_R = quaternion_to_matrix(cur_obj_pose[:, 3:7])
-        init_obj_R = quaternion_to_matrix(self.object_init_state[:, 3:7])
-        init_obj_T = torch.eye(4, device=self.device).repeat(self.num_envs, 1, 1)
-        init_obj_T[:, :3, :3] = init_obj_R
-        init_obj_T[:, :3, 3] = self.object_init_state[:, :3].clone()
+        world_t_hand = torch.tensor(
+            [self.hand_pose.p.x, self.hand_pose.p.y, self.hand_pose.p.z],
+            device=self.device,
+        )
+        world_q_hand = torch.tensor(
+            [
+                self.hand_pose.r.x,
+                self.hand_pose.r.y,
+                self.hand_pose.r.z,
+                self.hand_pose.r.w,
+            ],
+            device=self.device,
+        )
+        world_R_hand = quaternion_to_matrix(world_q_hand)
+        world_T_hand = torch.eye(4, device=self.device).repeat(self.num_envs, 1, 1)
+        world_T_hand[:, :3, :3] = world_R_hand
+        world_T_hand[:, :3, 3] = world_t_hand
 
         cur_obj_T = torch.eye(4, device=self.device).repeat(self.num_envs, 1, 1)
         cur_obj_T[:, :3, :3] = cur_obj_R
         cur_obj_T[:, :3, 3] = cur_obj_pose[:, :3]
 
-        relative_obj_T = torch.bmm(torch.inverse(init_obj_T), cur_obj_T)
-        relative_obj_pos = relative_obj_T[:, :3, 3]
-        # cur_obj_pos = relative_obj_pos[:, None] + observation_noise[:, None]
-        cur_obj_pos = self.object_pos[:, None] + observation_noise[:, None]
-        
-
+        hand_T_obj = torch.bmm(torch.inverse(world_T_hand), cur_obj_T)
+        hand_t_obj = hand_T_obj[:, :3, 3]
+        hand_q_obj = matrix_to_quaternion(hand_T_obj[:, :3, :3])
+        curr_obj_pos = hand_t_obj + observation_noise
+        quat_noise_euler = torch.zeros(
+            [hand_t_obj.shape[0], 3], device=self.device
+        ) + torch.normal(0.0, 0.01, size=(hand_t_obj.shape[0], 3), device=self.device)
+        quat_noise = quat_from_euler_xyz(
+            quat_noise_euler[:, 0], quat_noise_euler[:, 1], quat_noise_euler[:, 2]
+        )
+        curr_obj_rot = quat_mul(hand_q_obj, quat_noise)
+        curr_obj_pose = torch.cat([curr_obj_pos, curr_obj_rot], dim=-1)
 
         self.obs_buf_lag_history[:] = torch.cat([prev_obs_buf, cur_obs_buf], dim=1)
-        self.obj_pos_lag_history[:] = torch.cat([prev_obj_pos_buf, cur_obj_pos], dim=1)
+        self.obj_pose_lag_history[:] = torch.cat(
+            [prev_obj_pos_buf, curr_obj_pose[:, None]], dim=1
+        )
 
         # refill the initialized buffers
         at_reset_env_ids = self.at_reset_buf.nonzero(as_tuple=False).squeeze(-1)
@@ -519,12 +548,9 @@ class AllegroHandHora(VecTask):
         self.obs_buf_lag_history[at_reset_env_ids, :, 16:32] = (
             self.allegro_hand_dof_pos[at_reset_env_ids].unsqueeze(1)
         )
-        # self.obj_pos_lag_history[at_reset_env_ids, :, 0:3] = self.object_pos[
-        #     at_reset_env_ids
-        # ].clone().unsqueeze(1)
-        self.obj_pos_lag_history[at_reset_env_ids, :, 0:3] = cur_obj_pos[
-            at_reset_env_ids
-        ].clone()
+        self.obj_pose_lag_history[at_reset_env_ids, :, 0:7] = (
+            cur_obj_pose[at_reset_env_ids].unsqueeze(1).clone()
+        )
 
         t_buf = (self.obs_buf_lag_history[:, -3:].reshape(self.num_envs, -1)).clone()
 
@@ -535,7 +561,7 @@ class AllegroHandHora(VecTask):
             :, -self.prop_hist_len :
         ].clone()
 
-        self.object_pos_hist_buf[:] = self.obj_pos_lag_history[
+        self.object_pose_hist_buf[:] = self.obj_pose_lag_history[
             :, -self.prop_hist_len :
         ].clone()
 
@@ -736,14 +762,14 @@ class AllegroHandHora(VecTask):
         super().reset()
         self.obs_dict["priv_info"] = self.priv_info_buf.to(self.rl_device)
         self.obs_dict["proprio_hist"] = self.proprio_hist_buf.to(self.rl_device)
-        self.obs_dict["object_pos_hist"] = self.object_pos_hist_buf.to(self.rl_device)
+        self.obs_dict["object_pose_hist"] = self.object_pose_hist_buf.to(self.rl_device)
         return self.obs_dict
 
     def step(self, actions):
         super().step(actions)
         self.obs_dict["priv_info"] = self.priv_info_buf.to(self.rl_device)
         self.obs_dict["proprio_hist"] = self.proprio_hist_buf.to(self.rl_device)
-        self.obs_dict["object_pos_hist"] = self.object_pos_hist_buf.to(self.rl_device)
+        self.obs_dict["object_pose_hist"] = self.object_pose_hist_buf.to(self.rl_device)
         return self.obs_dict, self.rew_buf, self.reset_buf, self.extras
 
     def update_low_level_control(self):
@@ -877,8 +903,8 @@ class AllegroHandHora(VecTask):
         self.priv_info_buf = torch.zeros(
             (num_envs, self.num_env_factors), device=self.device, dtype=torch.float
         )
-        self.object_pos_hist_buf = torch.zeros(
-            (num_envs, self.prop_hist_len, 3), device=self.device, dtype=torch.float
+        self.object_pose_hist_buf = torch.zeros(
+            (num_envs, self.prop_hist_len, 7), device=self.device, dtype=torch.float
         )
         self.proprio_hist_buf = torch.zeros(
             (num_envs, self.prop_hist_len, 32), device=self.device, dtype=torch.float

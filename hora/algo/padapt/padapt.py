@@ -51,8 +51,10 @@ class ProprioAdapt(object):
         self.running_mean_std.eval()
         self.sa_mean_std = RunningMeanStd((self.proprio_hist_dim, 32)).to(self.device)
         self.sa_mean_std.train()
-        self.obj_pos_mean_std = RunningMeanStd((self.proprio_hist_dim, 3)).to(self.device)
-        self.obj_pos_mean_std.train()
+        self.obj_pose_mean_std = RunningMeanStd((self.proprio_hist_dim, 7)).to(
+            self.device
+        )
+        self.obj_pose_mean_std.train()
         # ---- Output Dir ----
         self.output_dir = output_dir
         self.nn_dir = os.path.join(self.output_dir, "stage2_nn")
@@ -92,7 +94,7 @@ class ProprioAdapt(object):
         self.model.eval()
         self.running_mean_std.eval()
         self.sa_mean_std.eval()
-        self.obj_pos_mean_std.eval()
+        self.obj_pose_mean_std.eval()
 
     def test(self):
         self.set_eval()
@@ -101,7 +103,9 @@ class ProprioAdapt(object):
             input_dict = {
                 "obs": self.running_mean_std(obs_dict["obs"]),
                 "proprio_hist": self.sa_mean_std(obs_dict["proprio_hist"].detach()),
-                "object_pos_hist": self.obj_pos_mean_std(obs_dict["object_pos_hist"].detach()),
+                "object_pose_hist": self.obj_pose_mean_std(
+                    obs_dict["object_pose_hist"].detach()
+                ),
             }
             mu = self.model.act_inference(input_dict)
             mu = torch.clamp(mu, -1.0, 1.0)
@@ -118,7 +122,9 @@ class ProprioAdapt(object):
                 "obs": self.running_mean_std(obs_dict["obs"]).detach(),
                 "priv_info": obs_dict["priv_info"],
                 "proprio_hist": self.sa_mean_std(obs_dict["proprio_hist"].detach()),
-                "object_pos_hist": self.obj_pos_mean_std(obs_dict["object_pos_hist"].detach()),
+                "object_pose_hist": self.obj_pose_mean_std(
+                    obs_dict["object_pose_hist"].detach()
+                ),
             }
             mu, _, _, e, e_gt = self.model._actor_critic(input_dict)
 
@@ -164,7 +170,7 @@ class ProprioAdapt(object):
                 f"Agent Steps: {int(self.agent_steps // 1e6):04}M | FPS: {all_fps:.1f} | "
                 f"Last FPS: {last_fps:.1f} | "
                 f"Current Best: {self.best_rewards:.2f} "
-                f"Adapt loss: {loss}" # Adapt loss2: {loss2}"
+                f"Adapt loss: {loss}"  # Adapt loss2: {loss2}"
             )
             tprint(info_string)
 
@@ -175,7 +181,11 @@ class ProprioAdapt(object):
         self.writer.add_scalar(
             "episode_lengths/step", self.mean_eps_length.get_mean(), self.agent_steps
         )
-        self.writer.add_scalar("padapt_loss/step", self.latent_loss_stat / self.loss_stat_cnt, self.agent_steps)
+        self.writer.add_scalar(
+            "padapt_loss/step",
+            self.latent_loss_stat / self.loss_stat_cnt,
+            self.agent_steps,
+        )
 
         for k, v in self.direct_info.items():
             self.writer.add_scalar(f"{k}/frame", v, self.agent_steps)
@@ -193,7 +203,7 @@ class ProprioAdapt(object):
         self.running_mean_std.load_state_dict(checkpoint["running_mean_std"])
         self.model.load_state_dict(checkpoint["model"])
         self.sa_mean_std.load_state_dict(checkpoint["sa_mean_std"])
-        self.obj_pos_mean_std.load_state_dict(checkpoint["obj_pos_mean_std"])
+        self.obj_pose_mean_std.load_state_dict(checkpoint["obj_pos_mean_std"])
 
     def save(self, name):
         weights = {
@@ -203,6 +213,6 @@ class ProprioAdapt(object):
             weights["running_mean_std"] = self.running_mean_std.state_dict()
         if self.sa_mean_std:
             weights["sa_mean_std"] = self.sa_mean_std.state_dict()
-        if self.obj_pos_mean_std:
-            weights["obj_pos_mean_std"] = self.obj_pos_mean_std.state_dict()
+        if self.obj_pose_mean_std:
+            weights["obj_pose_mean_std"] = self.obj_pose_mean_std.state_dict()
         torch.save(weights, f"{name}.ckpt")
