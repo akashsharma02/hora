@@ -4,6 +4,8 @@
 # Copyright (c) 2022 Haozhi Qi
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+import sys
+import time
 import threading
 import signal
 import numpy as np
@@ -13,6 +15,8 @@ from hora.algo.models.running_mean_std import RunningMeanStd
 import torch
 import rclpy
 from rclpy.node import Node
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 
 def _obs_allegro2hora(obses):
@@ -38,8 +42,44 @@ class HoraPoseSubscriber(Node):
     def __init__(self, topic):
         super().__init__("hora_pose_subscriber")
         self.topic = topic
-        self.subscription = self.create_subscription()
 
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        self.hand_T_object = None
+        # 20Hz inference timer
+        self.timer = self.create_timer(0.05, self.on_timer)
+
+    def on_timer(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "hand_base_link", self.topic, rclpy.time.Time()
+            )
+            obj_quat = [
+                transform.transform.rotation.x,
+                transform.transform.rotation.y,
+                transform.transform.rotation.z,
+                transform.transform.rotation.w,
+            ]
+            obj_pos = [
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                transform.transform.translation.z,
+            ]
+            obj_quat = np.array(obj_quat, dtype=np.float32)
+            obj_pos = np.array(obj_pos, dtype=np.float32)
+            # Process the pose data as needed
+            self.hand_T_object = np.concatenate([obj_pos, obj_quat]).astype(np.float32)
+
+        except Exception as e:
+            self.get_logger().error(f"Failed to get transform: {e}")
+
+    def get_pose(self):
+        if self.hand_T_object is not None:
+            return self.hand_T_object
+        else:
+            self.get_logger().warning("Object pose not available yet.")
+            return None
 
 class HardwarePlayer(object):
     def __init__(self, config):
@@ -66,11 +106,10 @@ class HardwarePlayer(object):
         self.sa_mean_std = RunningMeanStd((30, 32)).to(self.device)
         self.sa_mean_std.eval()
 
-        self.pose_topic = "/object_marker"
+        self.pose_topic = "object_marker"
 
-        self.pose_subscriber_node = PoseSubscriber(self.pose_topic)
-        self.noisy_obj_quat_mean_std = RunningMeanStd((30, 7)).to(self.device)
-        self.noisy_obj_quat_mean_std.eval()
+        self.noisy_obj_pose_mean_std = RunningMeanStd((30, 7)).to(self.device)
+        self.noisy_obj_pose_mean_std.eval()
         # hand setting
         self.init_pose = [
             0.0627,
@@ -142,6 +181,7 @@ class HardwarePlayer(object):
         rclpy.init()
         executor = rclpy.executors.SingleThreadedExecutor()
         allegro = AllegroRobot()
+        pose_subscriber = HoraPoseSubscriber(self.pose_topic)
 
         def disconnect(signum, frame):
             print("ctrl-C received")
@@ -151,6 +191,7 @@ class HardwarePlayer(object):
         signal.signal(signal.SIGINT, disconnect)
 
         executor.add_node(allegro)
+        executor.add_node(pose_subscriber)
 
         threading.Thread(target=executor.spin, daemon=True).start()
 
@@ -179,6 +220,9 @@ class HardwarePlayer(object):
         proprio_hist_buf = torch.from_numpy(
             np.zeros((1, 30, 16 * 2)).astype(np.float32)
         ).cuda()
+        noisy_obj_pose_buf = torch.from_numpy(
+            np.zeros((1, 30, 7)).astype(np.float32)
+        ).cuda()
 
         def unscale(x, lower, upper):
             return (2.0 * x - upper - lower) / (upper - lower)
@@ -195,6 +239,15 @@ class HardwarePlayer(object):
                 prev_target.clone()
             )  # current target (obs_t-1 + s * act_t-1)
 
+
+        if self.pose_topic is not None:
+            while pose_subscriber.get_pose() is None:
+                print("Waiting for object pose...")
+                time.sleep(0.1)
+            noisy_obj_pose_buf[:, :, :7] = torch.from_numpy(
+                pose_subscriber.get_pose()
+            )[None, None].cuda()
+
         proprio_hist_buf[:, :, :16] = cur_obs_buf.clone()
         proprio_hist_buf[:, :, 16:32] = prev_target.clone()
 
@@ -204,6 +257,11 @@ class HardwarePlayer(object):
                 "obs": obs,
                 "proprio_hist": self.sa_mean_std(proprio_hist_buf.clone()),
             }
+            if self.pose_topic is not None:
+                input_dict["object_pose_hist"] = self.noisy_obj_pose_mean_std(
+                    noisy_obj_pose_buf.clone()
+                )
+
             action = self.model.act_inference(input_dict)
             action = torch.clamp(action, -1.0, 1.0)
 
@@ -232,8 +290,19 @@ class HardwarePlayer(object):
             cur_proprio_buf = torch.cat([cur_obs_buf, target.clone()], dim=-1)[:, None]
             proprio_hist_buf[:] = torch.cat([priv_proprio_buf, cur_proprio_buf], dim=1)
 
+            if self.pose_topic is not None:
+                prev_noisy_obj_pose_buf = noisy_obj_pose_buf[:, 1:30, :].clone()
+                curr_noisy_obj_pose = torch.from_numpy(
+                    pose_subscriber.get_pose()
+                )[None, None].cuda()
+                print(f"current noisy obj pose: {curr_noisy_obj_pose}")
+                noisy_obj_pose_buf[:] = torch.cat(
+                    [prev_noisy_obj_pose_buf, curr_noisy_obj_pose], dim=1
+                )
+
     def restore(self, fn):
         checkpoint = torch.load(fn)
         self.running_mean_std.load_state_dict(checkpoint["running_mean_std"])
         self.model.load_state_dict(checkpoint["model"])
         self.sa_mean_std.load_state_dict(checkpoint["sa_mean_std"])
+        self.noisy_obj_pose_mean_std.load_state_dict(checkpoint["obj_pose_mean_std"])
