@@ -11,7 +11,8 @@ import os
 from hora.algo.models.models import ActorCritic
 from hora.algo.models.running_mean_std import RunningMeanStd
 import torch
-from hora.utils.misc import tprint
+import rclpy
+from rclpy.node import Node
 
 
 def _obs_allegro2hora(obses):
@@ -31,6 +32,13 @@ def _action_hora2allegro(actions):
     cmd_act[[12, 13, 14, 15]] = actions[[4, 5, 6, 7]]
     cmd_act[[8, 9, 10, 11]] = actions[[12, 13, 14, 15]]
     return cmd_act
+
+
+class HoraPoseSubscriber(Node):
+    def __init__(self, topic):
+        super().__init__("hora_pose_subscriber")
+        self.topic = topic
+        self.subscription = self.create_subscription()
 
 
 class HardwarePlayer(object):
@@ -57,6 +65,12 @@ class HardwarePlayer(object):
         self.running_mean_std.eval()
         self.sa_mean_std = RunningMeanStd((30, 32)).to(self.device)
         self.sa_mean_std.eval()
+
+        self.pose_topic = "/object_marker"
+
+        self.pose_subscriber_node = PoseSubscriber(self.pose_topic)
+        self.noisy_obj_quat_mean_std = RunningMeanStd((30, 7)).to(self.device)
+        self.noisy_obj_quat_mean_std.eval()
         # hand setting
         self.init_pose = [
             0.0627,
@@ -123,8 +137,6 @@ class HardwarePlayer(object):
 
     def deploy(self, keyboard_interactive=False):
         import rclpy
-
-        # from hora.algo.deploy.robots.allegro import Allegro
         from gum.devices.metahand.allegro_client import AllegroRobot
 
         rclpy.init()

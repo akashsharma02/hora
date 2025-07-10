@@ -203,7 +203,7 @@ class ProprioAdapt(object):
         self.running_mean_std.load_state_dict(checkpoint["running_mean_std"])
         self.model.load_state_dict(checkpoint["model"])
         self.sa_mean_std.load_state_dict(checkpoint["sa_mean_std"])
-        self.obj_pose_mean_std.load_state_dict(checkpoint["obj_pos_mean_std"])
+        self.obj_pose_mean_std.load_state_dict(checkpoint["obj_pose_mean_std"])
 
     def save(self, name):
         weights = {
