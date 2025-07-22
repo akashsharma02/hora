@@ -11,13 +11,11 @@
 # --------------------------------------------------------
 
 import hydra
-
 from omegaconf import DictConfig, OmegaConf
-from hora.utils.misc import set_np_formatting, set_seed
 
 # noinspection PyUnresolvedReferences
 from hora.algo.deploy.deploy import HardwarePlayer
-
+from hora.utils.misc import set_np_formatting, set_seed
 
 # ---- OmegaConf & Hydra Config
 # Resolvers used in hydra configs (see https://omegaconf.readthedocs.io/en/2.1_branch/usage.html#resolvers)
@@ -37,7 +35,9 @@ def main(config: DictConfig):
     config.seed = set_seed(config.seed)
     agent = HardwarePlayer(config)
     agent.restore(config.checkpoint)
-    agent.deploy(keyboard_interactive=config.keyboard_interactive)
+    agent.deploy(
+        keyboard_interactive=config.keyboard_interactive, pose_topic=config.pose_topic
+    )
 
 
 if __name__ == "__main__":

@@ -4,19 +4,21 @@
 # Copyright (c) 2022 Haozhi Qi
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-import sys
-import time
-import threading
-import signal
-import numpy as np
 import os
-from hora.algo.models.models import ActorCritic
-from hora.algo.models.running_mean_std import RunningMeanStd
-import torch
+import signal
+import sys
+import threading
+import time
+
+import numpy as np
 import rclpy
+import torch
 from rclpy.node import Node
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
+
+from hora.algo.models.models import ActorCritic
+from hora.algo.models.running_mean_std import RunningMeanStd
 
 
 def _obs_allegro2hora(obses):
@@ -80,6 +82,7 @@ class HoraPoseSubscriber(Node):
         else:
             self.get_logger().warning("Object pose not available yet.")
             return None
+
 
 class HardwarePlayer(object):
     def __init__(self, config):
@@ -174,14 +177,17 @@ class HardwarePlayer(object):
             )
         ).to(self.device)
 
-    def deploy(self, keyboard_interactive=False):
+    def deploy(self, keyboard_interactive=False, pose_topic="object_marker"):
         import rclpy
         from gum.devices.metahand.allegro_client import AllegroRobot
+
+        self.pose_topic = pose_topic
+
+        print(f"Pose topic: {self.pose_topic}")
 
         rclpy.init()
         executor = rclpy.executors.SingleThreadedExecutor()
         allegro = AllegroRobot()
-        pose_subscriber = HoraPoseSubscriber(self.pose_topic)
 
         def disconnect(signum, frame):
             print("ctrl-C received")
@@ -191,7 +197,10 @@ class HardwarePlayer(object):
         signal.signal(signal.SIGINT, disconnect)
 
         executor.add_node(allegro)
-        executor.add_node(pose_subscriber)
+        pose_subscriber = None
+        if self.pose_topic is not None:
+            pose_subscriber = HoraPoseSubscriber(self.pose_topic)
+            executor.add_node(pose_subscriber)
 
         threading.Thread(target=executor.spin, daemon=True).start()
 
@@ -239,14 +248,13 @@ class HardwarePlayer(object):
                 prev_target.clone()
             )  # current target (obs_t-1 + s * act_t-1)
 
-
-        if self.pose_topic is not None:
+        if self.pose_topic is not None and pose_subscriber is not None:
             while pose_subscriber.get_pose() is None:
                 print("Waiting for object pose...")
                 time.sleep(0.1)
-            noisy_obj_pose_buf[:, :, :7] = torch.from_numpy(
-                pose_subscriber.get_pose()
-            )[None, None].cuda()
+            noisy_obj_pose_buf[:, :, :7] = torch.from_numpy(pose_subscriber.get_pose())[
+                None, None
+            ].cuda()
 
         proprio_hist_buf[:, :, :16] = cur_obs_buf.clone()
         proprio_hist_buf[:, :, 16:32] = prev_target.clone()
@@ -292,9 +300,9 @@ class HardwarePlayer(object):
 
             if self.pose_topic is not None:
                 prev_noisy_obj_pose_buf = noisy_obj_pose_buf[:, 1:30, :].clone()
-                curr_noisy_obj_pose = torch.from_numpy(
-                    pose_subscriber.get_pose()
-                )[None, None].cuda()
+                curr_noisy_obj_pose = torch.from_numpy(pose_subscriber.get_pose())[
+                    None, None
+                ].cuda()
                 print(f"current noisy obj pose: {curr_noisy_obj_pose}")
                 noisy_obj_pose_buf[:] = torch.cat(
                     [prev_noisy_obj_pose_buf, curr_noisy_obj_pose], dim=1

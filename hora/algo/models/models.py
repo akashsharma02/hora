@@ -70,6 +70,7 @@ class ActorCritic(nn.Module):
 
             if self.priv_info_stage2:
                 self.adapt_tconv = ProprioAdaptTConv(input_chan=(32 + 7))
+                # self.adapt_tconv = ProprioAdaptTConv(input_chan=(32))
 
         self.actor_mlp = MLP(units=self.units, input_size=mlp_input_shape)
         self.value = torch.nn.Linear(out_size, 1)
